@@ -1,0 +1,61 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: waha-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+
+  waha:
+    image: devlikeapro/waha:latest
+    platform: linux/amd64
+    container_name: waha-core
+    restart: unless-stopped
+    depends_on:
+      - redis
+    dns: [1.1.1.1, 8.8.8.8]
+    logging:
+      driver: json-file
+      options: { max-size: "100m", max-file: "10" }
+    # Bind only to loopback to avoid public exposure
+    ports:
+      - "127.0.0.1:8080:3000"
+    environment:
+      - WAHA_DASHBOARD_ENABLED=${WAHA_DASHBOARD_ENABLED}
+      - WAHA_APPS_ENABLED=${WAHA_APPS_ENABLED}
+      - WAHA_DASHBOARD_USERNAME=${WAHA_DASHBOARD_USERNAME}
+      - WAHA_DASHBOARD_PASSWORD=${WAHA_DASHBOARD_PASSWORD}
+      - WHATSAPP_API_KEY=${WHATSAPP_API_KEY}
+      - WAHA_API_KEY_PLAIN=${WAHA_API_KEY_PLAIN}
+      - WAHA_REDIS_HOST=redis
+      - WAHA_REDIS_PORT=6379
+      - WAHA_LOG_FORMAT=${WAHA_LOG_FORMAT}
+      - WAHA_LOG_LEVEL=${WAHA_LOG_LEVEL}
+      - WHATSAPP_DEFAULT_ENGINE=${WHATSAPP_DEFAULT_ENGINE}
+      - WAHA_PRINT_QR=${WAHA_PRINT_QR}
+      - WHATSAPP_SWAGGER_USERNAME=${WHATSAPP_SWAGGER_USERNAME}
+      - WHATSAPP_SWAGGER_PASSWORD=${WHATSAPP_SWAGGER_PASSWORD}
+      - WAHA_MEDIA_STORAGE=${WAHA_MEDIA_STORAGE}
+      - WHATSAPP_FILES_LIFETIME=${WHATSAPP_FILES_LIFETIME}
+      - WHATSAPP_FILES_FOLDER=${WHATSAPP_FILES_FOLDER}
+      - WHATSAPP_DOWNLOAD_MEDIA=${WHATSAPP_DOWNLOAD_MEDIA}
+      - WHATSAPP_SWAGGER_CONFIG_ADVANCED=${WHATSAPP_SWAGGER_CONFIG_ADVANCED}
+      - WHATSAPP_API_HOSTNAME=${WHATSAPP_API_HOSTNAME}
+      # Internal base URL for service-to-service calls
+      - WAHA_BASE_URL=http://waha:3000
+      - SERVICE_FQDN_WAHA=${SERVICE_FQDN_WAHA}
+      - SERVICE_URL_WAHA=${SERVICE_URL_WAHA}
+      - WAHA_HOSTNAME=0.0.0.0
+      - WAHA_PORT=3000
+    volumes:
+      - ./sessions:/app/.sessions
+      - ./media:/app/.media
+
+networks:
+  default:
+    name: waha-local-network
+
+volumes:
+  redis_data:
+
