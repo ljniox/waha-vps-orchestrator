@@ -24,6 +24,19 @@ services:
     # No host port published; WAHA will call http://orchestrator:8000 over the shared network
     networks: [default, waha_local]
 
+  runner:
+    build:
+      context: ../../runner
+      dockerfile: Dockerfile
+    container_name: runner-dev
+    restart: unless-stopped
+    environment:
+      - RUNNER_ID=dev
+      - BUS_URL=nats://nats:4222
+      - ALLOWLIST=cc cookiecutter git gh pnpm npm node python uv pip pytest supabase docker
+    depends_on: [nats]
+    networks: [default]
+
 networks:
   default:
     name: waha-orch-attach

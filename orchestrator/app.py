@@ -19,9 +19,11 @@ except Exception:  # type: ignore
 WAHA_BASE_URL = os.getenv("WAHA_BASE_URL", "http://waha:3000")
 WAHA_TOKEN = os.getenv("WAHA_TOKEN", "replace_me")
 # WAHA outbound message endpoint is implementation-specific; make it configurable
-WAHA_SEND_PATH = os.getenv("WAHA_SEND_PATH", "/api/messages/send")
+WAHA_SEND_PATH = os.getenv("WAHA_SEND_PATH", "/api/sendText")
+WAHA_SEND_MODE = os.getenv("WAHA_SEND_MODE", "json")  # json | sendText
+WAHA_SESSION = os.getenv("WAHA_SESSION", "default")
 WAHA_CHAT_KEY = os.getenv("WAHA_CHAT_KEY", "chatId")
-WAHA_TEXT_KEY = os.getenv("WAHA_TEXT_KEY", "message")
+WAHA_TEXT_KEY = os.getenv("WAHA_TEXT_KEY", "text")
 
 # Webhook protection
 INCOMING_SECRET = os.getenv("INCOMING_SECRET", "replace_me")
@@ -44,10 +46,16 @@ def _headers() -> Dict[str, str]:
 
 
 async def send_whatsapp_text(chat_id: str, text: str):
-    payload = {WAHA_CHAT_KEY: chat_id, WAHA_TEXT_KEY: text}
     async with httpx.AsyncClient(timeout=30) as client:
-        url = f"{WAHA_BASE_URL}{WAHA_SEND_PATH}"
-        r = await client.post(url, json=payload, headers=_headers())
+        if WAHA_SEND_MODE == "sendText":
+            phone = chat_id.split("@", 1)[0]
+            url = f"{WAHA_BASE_URL}/api/sendText"
+            params = {"session": WAHA_SESSION, "phone": phone, "message": text}
+            r = await client.post(url, params=params, headers=_headers())
+        else:
+            payload = {WAHA_CHAT_KEY: chat_id, WAHA_TEXT_KEY: text, "session": WAHA_SESSION}
+            url = f"{WAHA_BASE_URL}{WAHA_SEND_PATH}"
+            r = await client.post(url, json=payload, headers=_headers())
         r.raise_for_status()
 
 
@@ -58,40 +66,45 @@ def authorize(req: Request):
 
 
 def parse_command(text: str) -> Dict[str, Any]:
-    parts = text.strip().split()
-    if not parts:
+    import re
+    s = (text or "").strip()
+    if not s:
         return {"type": "noop"}
-    head = parts[0].lower()
+    head, _, tail = s.partition(" ")
+    head = head.lower()
     if head == "/hosts":
         return {"type": "hosts"}
-    if head == "/logs" and len(parts) >= 2:
-        return {"type": "logs", "job_id": parts[1]}
-    if head == "/stop" and len(parts) >= 2:
-        return {"type": "stop", "job_id": parts[1]}
+    if head == "/logs":
+        job = tail.strip().split()[0] if tail.strip() else ""
+        return {"type": "logs", "job_id": job} if job else {"type": "noop"}
+    if head == "/stop":
+        job = tail.strip().split()[0] if tail.strip() else ""
+        return {"type": "stop", "job_id": job} if job else {"type": "noop"}
     if head == "/exec":
-        # /exec host=<id> cmd="pytest -q"
-        args = " ".join(parts[1:])
-        host = "dev"
-        cmd = None
-        for token in shlex.split(args):
-            if token.startswith("host="):
-                host = token.split("=", 1)[1]
-            if token.startswith("cmd="):
-                cmd = token.split("=", 1)[1].strip('"')
-        return {"type": "exec", "host": host, "cmd": cmd}
+        host = re.search(r"host=([^\s]+)", s)
+        host_id = host.group(1) if host else "dev"
+        cmd_match = re.search(r"cmd=(\"([^\"]*)\"|\S.*)$", s)
+        cmd_str = None
+        if cmd_match:
+            if cmd_match.group(2) is not None:
+                cmd_str = cmd_match.group(2)
+            else:
+                # unquoted: take from after cmd=
+                cmd_str = cmd_match.group(1)
+        return {"type": "exec", "host": host_id, "cmd": cmd_str}
     if head == "/run":
-        # /run host=<id> "<prompt>"
-        host = "dev"
-        prompt = text[len("/run"):].strip()
-        for token in parts[1:]:
-            if token.startswith("host="):
-                host = token.split("=", 1)[1]
-        if '"' in prompt:
-            try:
-                prompt = shlex.split(prompt)[0 if prompt.startswith('"') else 1]
-            except Exception:
-                pass
-        return {"type": "run", "host": host, "prompt": prompt}
+        host = re.search(r"host=([^\s]+)", s)
+        host_id = host.group(1) if host else "dev"
+        # capture quoted prompt or remainder after /run and any host=...
+        q = re.search(r"/run(?:\s+host=[^\s]+)?\s+\"([^\"]+)\"", s)
+        if q:
+            prompt = q.group(1)
+        else:
+            # remove /run and host=... tokens
+            rest = re.sub(r"/run", "", s, count=1)
+            rest = re.sub(r"host=[^\s]+", "", rest)
+            prompt = rest.strip()
+        return {"type": "run", "host": host_id, "prompt": prompt}
     return {"type": "noop"}
 
 
@@ -153,14 +166,50 @@ async def on_start():
 @app.post("/waha/webhook")
 async def waha_webhook(request: Request, background: BackgroundTasks):
     authorize(request)
+    # lightweight trace
+    try:
+        src = request.client.host if request.client else "?"
+        print(f"/waha/webhook from {src}")
+    except Exception:
+        pass
     body = await request.json()
-    msg = body.get("messages", [{}])[0]
-    chat_id = msg.get("chatId") or msg.get("from")
-    text = (msg.get("text", {}) or {}).get("body") or msg.get("text") or ""
+    try:
+        print("Webhook payload keys:", list(body.keys()))
+    except Exception:
+        pass
+    # Flexible extraction
+    msg = {}
+    if isinstance(body.get("messages"), list) and body.get("messages"):
+        msg = body["messages"][0] or {}
+    chat_id = None
+    text = ""
+    candidates = [msg, body.get("data", {}), body.get("message", {}), body.get("payload", {}), body]
+    for d in candidates:
+        if not isinstance(d, dict):
+            continue
+        chat_id = chat_id or d.get("chatId") or d.get("from") or d.get("jid") or d.get("remoteJid")
+        t = d.get("text")
+        if isinstance(t, dict):
+            text = text or t.get("body") or t.get("text") or ""
+        elif isinstance(t, str):
+            text = text or t
+        m = d.get("message")
+        if isinstance(m, dict):
+            text = text or m.get("conversation") or (m.get("extendedTextMessage") or {}).get("text") or ""
     if not chat_id:
         raise HTTPException(400, "missing chat_id")
 
+    # Debug:
+    try:
+        print(f"Parsed chat_id={chat_id} text={text!r}")
+    except Exception:
+        pass
+
     action = parse_command(text)
+    try:
+        print(f"Action: {action}")
+    except Exception:
+        pass
     if action["type"] == "noop":
         return {"ok": True}
 
@@ -180,7 +229,9 @@ async def waha_webhook(request: Request, background: BackgroundTasks):
     if action["type"] == "exec":
         host = action["host"]
         cmd_str = action.get("cmd") or ""
-        cmd = shlex.split(cmd_str)
+        # If value is quoted, strip quotes first then split
+        stripped = cmd_str.strip().strip('"')
+        cmd = shlex.split(stripped)
         if not allowlisted(cmd):
             await send_whatsapp_text(chat_id, "Command not allowed.")
             return {"ok": False}
@@ -224,4 +275,3 @@ async def waha_webhook(request: Request, background: BackgroundTasks):
         return {"ok": True}
 
     return {"ok": True}
-
