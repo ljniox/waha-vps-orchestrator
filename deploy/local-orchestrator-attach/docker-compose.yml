@@ -1,0 +1,32 @@
+services:
+  nats:
+    image: nats:2.10-alpine
+    container_name: nats
+    restart: unless-stopped
+    command: ["-js"]
+    networks: [default, waha_local]
+
+  orchestrator:
+    build:
+      context: ../../orchestrator
+      dockerfile: Dockerfile
+    container_name: orchestrator
+    restart: unless-stopped
+    environment:
+      - INCOMING_SECRET=${INCOMING_SECRET}
+      - BUS_URL=${BUS_URL}
+      - WAHA_BASE_URL=${WAHA_BASE_URL}
+      - WAHA_TOKEN=${WAHA_TOKEN}
+      - WAHA_SEND_PATH=${WAHA_SEND_PATH}
+      - WAHA_CHAT_KEY=${WAHA_CHAT_KEY}
+      - WAHA_TEXT_KEY=${WAHA_TEXT_KEY}
+      - ALLOWLIST=${ALLOWLIST}
+    # No host port published; WAHA will call http://orchestrator:8000 over the shared network
+    networks: [default, waha_local]
+
+networks:
+  default:
+    name: waha-orch-attach
+  waha_local:
+    external: true
+    name: waha-local-network
